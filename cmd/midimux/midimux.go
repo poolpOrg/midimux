@@ -29,20 +29,34 @@ import (
 	_ "gitlab.com/gomidi/midi/v2/drivers/rtmididrv"
 )
 
+type multiValue struct {
+	options []string
+}
+
 func main() {
-	var opt_input string
-	var opt_output string
-	var opt_connect string
-	var opt_listen string
+
+	//var opt_connect string
+	//var opt_listen string
 	var opt_verbose bool
 	var opt_list bool
 
+	var opt_inputs []string
+	var opt_outputs []string
+
 	flag.BoolVar(&opt_list, "list", false, "list input and output ports")
-	flag.StringVar(&opt_input, "input", "", "input device port")
-	flag.StringVar(&opt_output, "output", "", "output device port")
 	flag.BoolVar(&opt_verbose, "verbose", false, "verbose")
-	flag.StringVar(&opt_connect, "connect", "", "endpoint to a midimux server (localhost:1057)")
-	flag.StringVar(&opt_listen, "listen", "", "interface for accepting midimux clients (:1057)")
+	//flag.StringVar(&opt_connect, "connect", "", "endpoint to a midimux server (localhost:1057)")
+	//flag.StringVar(&opt_listen, "listen", "", "interface for accepting midimux clients (:1057)")
+
+	flag.Func("input", "add input device", func(value string) error {
+		opt_inputs = append(opt_inputs, value)
+		return nil
+	})
+	flag.Func("output", "add output device", func(value string) error {
+		opt_outputs = append(opt_outputs, value)
+		return nil
+	})
+
 	flag.Parse()
 
 	if opt_list {
@@ -59,86 +73,95 @@ func main() {
 		fmt.Println()
 	}
 
+	var udpEndpoint *net.UDPAddr
+
 	var inPort drivers.In
+	var inPorts []drivers.In
+	var inConn net.PacketConn
+	var inConns []net.PacketConn
+
 	var outPort drivers.Out
+	var outPorts []drivers.Out
+	var outConn *net.UDPConn
+	var outConns []*net.UDPConn
+
 	var err error
 
-	if opt_input != "" {
-		inputPortID, err := strconv.Atoi(opt_input)
-		if err != nil {
-			inPort, err = midi.FindInPort(opt_input)
-			if err == nil {
-				if !inPort.IsOpen() {
-					err = inPort.Open()
-				}
+	for _, opt_input := range opt_inputs {
+		_, err = net.ResolveUDPAddr("udp", opt_input)
+		if err == nil {
+			inConn, err = net.ListenPacket("udp", opt_input)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer inConn.Close()
+			inConns = append(inConns, inConn)
+			if opt_verbose {
+				fmt.Println("input:", fmt.Sprintf("udp://%s", inConn.LocalAddr().String()))
 			}
 		} else {
-			inPort, err = midi.InPort(inputPortID)
-		}
-		if err != nil {
-			log.Fatal(err)
-		}
-		if opt_verbose {
-			fmt.Println("input:", inPort)
-		}
-	}
-
-	if opt_output != "" {
-		outputPortID, err := strconv.Atoi(opt_output)
-		if err != nil {
-			outPort, err = midi.FindOutPort(opt_output)
-			if err == nil {
-				if !outPort.IsOpen() {
-					err = outPort.Open()
+			inputPortID, err := strconv.Atoi(opt_input)
+			if err != nil {
+				inPort, err = midi.FindInPort(opt_input)
+				if err == nil {
+					if !inPort.IsOpen() {
+						err = inPort.Open()
+					}
 				}
+			} else {
+				inPort, err = midi.InPort(inputPortID)
 			}
+			if err != nil {
+				log.Fatal(err)
+			}
+			inPorts = append(inPorts, inPort)
+			if opt_verbose {
+				fmt.Println("input:", inPort)
+			}
+		}
+	}
+
+	for _, opt_output := range opt_outputs {
+		udpEndpoint, err = net.ResolveUDPAddr("udp", opt_output)
+		if err == nil {
+			outConn, err = net.DialUDP("udp", nil, udpEndpoint)
+			if err != nil {
+				log.Fatal(err)
+			}
+			outConns = append(outConns, outConn)
 		} else {
-			outPort, err = midi.OutPort(outputPortID)
-		}
-		if err != nil {
-			log.Fatal(err)
-		}
-		if opt_verbose {
-			fmt.Println("output:", outPort)
+
+			outputPortID, err := strconv.Atoi(opt_output)
+			if err != nil {
+				outPort, err = midi.FindOutPort(opt_output)
+				if err == nil {
+					if !outPort.IsOpen() {
+						err = outPort.Open()
+					}
+				}
+			} else {
+				outPort, err = midi.OutPort(outputPortID)
+			}
+			if err != nil {
+				log.Fatal(err)
+			}
+			if opt_verbose {
+				fmt.Println("output:", outPort)
+			}
+			outPorts = append(outPorts, outPort)
 		}
 	}
 
-	var udpEndpoint *net.UDPAddr
-	var udpConnection *net.UDPConn
-	if opt_input != "" && opt_connect != "" {
-		udpEndpoint, err = net.ResolveUDPAddr("udp", opt_connect)
-		if err != nil {
-			log.Fatal(err)
-		}
-		udpConnection, err = net.DialUDP("udp", nil, udpEndpoint)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
+	done := make(chan bool)
 
-	var packetConn net.PacketConn
-	if opt_listen != "" {
-		packetConn, err = net.ListenPacket("udp", opt_listen)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer packetConn.Close()
-	}
-
-	if opt_input == "" && opt_listen == "" {
-		log.Fatal("no input, no output, what am I expected to do ?")
-	}
-
-	done := make(chan bool, 0)
-
-	if opt_input != "" {
-		go func() {
-			_, err = midi.ListenTo(inPort, func(msg midi.Message, absms int32) {
-				if opt_output != "" {
+	for _, inPort := range inPorts {
+		go func(_in drivers.In) {
+			_, err := midi.ListenTo(_in, func(msg midi.Message, absms int32) {
+				for _, outPort := range outPorts {
 					go outPort.Send(msg.Bytes())
 				}
-				if udpConnection != nil {
-					go udpConnection.Write(msg.Bytes())
+				for _, outConn := range outConns {
+					go outConn.Write(msg.Bytes())
 				}
 				if opt_verbose {
 					fmt.Println(msg)
@@ -147,24 +170,29 @@ func main() {
 			if err != nil {
 				log.Fatal(err)
 			}
-		}()
+		}(inPort)
 	}
 
-	if opt_listen != "" {
-		for {
-			buf := make([]byte, 1024)
-			n, _, err := packetConn.ReadFrom(buf)
-			if err != nil {
-				continue
+	for _, inConn := range inConns {
+		go func(_in net.PacketConn) {
+			for {
+				buf := make([]byte, 1024)
+				n, _, err := _in.ReadFrom(buf)
+				if err != nil {
+					continue
+				}
+				var msg midi.Message = buf[:n]
+				for _, outPort := range outPorts {
+					go outPort.Send(msg.Bytes())
+				}
+				for _, outConn := range outConns {
+					go outConn.Write(msg.Bytes())
+				}
+				if opt_verbose {
+					fmt.Println(msg)
+				}
 			}
-			var msg midi.Message = buf[:n]
-			if opt_output != "" {
-				go outPort.Send(msg.Bytes())
-			}
-			if opt_verbose {
-				fmt.Println(msg)
-			}
-		}
+		}(inConn)
 	}
 
 	<-done
