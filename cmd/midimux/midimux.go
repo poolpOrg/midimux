@@ -29,14 +29,7 @@ import (
 	_ "gitlab.com/gomidi/midi/v2/drivers/rtmididrv"
 )
 
-type multiValue struct {
-	options []string
-}
-
 func main() {
-
-	//var opt_connect string
-	//var opt_listen string
 	var opt_verbose bool
 	var opt_list bool
 
@@ -45,8 +38,6 @@ func main() {
 
 	flag.BoolVar(&opt_list, "list", false, "list input and output ports")
 	flag.BoolVar(&opt_verbose, "verbose", false, "verbose")
-	//flag.StringVar(&opt_connect, "connect", "", "endpoint to a midimux server (localhost:1057)")
-	//flag.StringVar(&opt_listen, "listen", "", "interface for accepting midimux clients (:1057)")
 
 	flag.Func("input", "add input device", func(value string) error {
 		opt_inputs = append(opt_inputs, value)
